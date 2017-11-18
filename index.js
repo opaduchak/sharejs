@@ -1,17 +1,20 @@
 // Library imports
-var util = require('util');
-var http = require('http');
-var raven = require('raven');
-var sharejs = require('share');
-var livedb = require('livedb');
-var Duplex = require('stream').Duplex;
-var WebSocketServer = require('ws').Server;
-var express = require('express');
-var bodyParser = require('body-parser');
-var morgan = require('morgan');
-var async = require('async');
+const util = require('util');
+const http = require('http');
+const raven = require('raven');
+const sharejs = require('share');
+const livedb = require('livedb');
+const Duplex = require('stream').Duplex;
+const WebSocketServer = require('ws').Server;
+const express = require('express');
+const bodyParser = require('body-parser');
+const morgan = require('morgan');
+const async = require('async');
+const livedbMongo = require('livedb-mongo');
+const fs = require('fs');
+const path = require('path');
 
-var settings = {
+const settings = {
     debug: process.env.SHAREJS_DEBUG ? process.env.SHAREJS_DEBUG === 'true' : true,
     // Server Options
     host: process.env.SHAREJS_SERVER_HOST || 'localhost',
@@ -23,7 +26,7 @@ var settings = {
     sentryDSN: process.env.SHAREJS_SENTRY_DSN
 };
 
-var client = new raven.Client(settings.sentryDSN);
+const client = new raven.Client(settings.sentryDSN);
 
 if (!settings.debug) {
     client.patchGlobal(function() {
@@ -38,18 +41,55 @@ if (!settings.debug) {
     });
 }
 
-// Server setup
-var mongo = require('livedb-mongo')(settings.dbUrl, {safe:true});
-var backend = livedb.client(mongo);
-var share = sharejs.server.createClient({backend: backend});
-var app = express();
-var jsonParser = bodyParser.json();
-var server = http.createServer(app);
-var wss = new WebSocketServer({server: server});
+const mongoOptions = {
+    safe: true,
+    server: {}
+};
 
-// Local variables
-var docs = {};  // TODO: Should this be stored in mongo?
-var locked = {};
+const mongoSSL = !!process.env.MONGO_SSL;
+const mongoSSLCertFile = process.env.MONGO_SSL_CERT_FILE;
+const mongoSSLKeyFile = process.env.MONGO_SSL_KEY_FILE;
+const mongoSSLCADir = process.env.MONGO_SSL_CA_DIR;
+const mongoSSLValidate = !!process.env.MONGO_SSL_VALIDATE;
+
+if (mongoSSL) {
+    console.info('Mongo SSL on');
+    mongoOptions.server.ssl = true;
+
+    if (fs.existsSync(mongoSSLCertFile) && fs.existsSync(mongoSSLKeyFile)) {
+        console.info('Mongo SSL:\n\tCert File: %s,\n\tKey File: %s', mongoSSLCertFile, mongoSSLKeyFile);
+        // sslCert {Buffer/String, default:null}, String or buffer containing the certificate we wish to present (needs to have a mongod server with ssl support, 2.4 or higher)
+        mongoOptions.server.sslCert = fs.readFileSync(mongoSSLCertFile);
+        // sslKey {Buffer/String, default:null}, String or buffer containing the certificate private key we wish to present (needs to have a mongod server with ssl support, 2.4 or higher)
+        mongoOptions.server.sslKey = fs.readFileSync(mongoSSLKeyFile);
+    }
+
+    if (fs.existsSync(mongoSSLCADir)) {
+        // sslCA {Array, default:null}, Array of valid certificates either as Buffers or Strings (needs to have a mongod server with ssl support, 2.4 or higher)
+        mongoOptions.server.sslCA = fs.readdirSync(mongoSSLCADir)
+            .map(function(file) {
+                return fs.readFileSync(path.join(mongoSSLCADir, file));
+            });
+
+        // sslValidate {Boolean, default:false}, validate mongod server certificate against ca (needs to have a mongod server with ssl support, 2.4 or higher)
+        mongoOptions.server.sslValidate = mongoSSLValidate;
+
+        console.info('Mongo SSL CA validation: %s', mongoOptions.server.sslValidate ? 'on' : 'off');
+    }
+}
+
+// Server setup
+const mongo = livedbMongo(settings.dbUrl, mongoOptions);
+const backend = livedb.client(mongo);
+const share = sharejs.server.createClient({backend: backend});
+const app = express();
+const jsonParser = bodyParser.json();
+const server = http.createServer(app);
+const wss = new WebSocketServer({server: server});
+
+// Local constiables
+const docs = {};  // TODO: Should this be stored in mongo?
+const locked = {};
 
 // Allow X-Forwarded-For headers
 app.set('trust proxy');
@@ -85,7 +125,7 @@ wss.broadcast = function(docId, message) {
 };
 
 wss.on('connection', function(client) {
-    var stream = new Duplex({objectMode: true});
+    const stream = new Duplex({objectMode: true});
 
     stream._read = function() {};
     stream._write = function(chunk, encoding, callback) {
@@ -118,8 +158,8 @@ wss.on('connection', function(client) {
         // Handle our custom messages separately
         if (data.registration) {
             console.info('[User Registered] docId: %s, userId: %s', data.docId, data.userId);
-            var docId = data.docId;
-            var userId = data.userId;
+            const docId = data.docId;
+            const userId = data.userId;
 
             // Create a metadata entry for this document
             if (!docs[docId]) {
@@ -140,7 +180,10 @@ wss.on('connection', function(client) {
 
             // Attach metadata to the client object
             client.userMeta = data;
-            wss.broadcast(docId, JSON.stringify({type: 'meta', users: docs[docId]}));
+            wss.broadcast(docId, JSON.stringify({
+                type: 'meta',
+                users: docs[docId]
+            }));
 
             // Lock client if doc is locked
             if (locked[docId]) {
@@ -163,8 +206,8 @@ wss.on('connection', function(client) {
         }
 
         if (client.userMeta) {
-            var docId = client.userMeta.docId;
-            var userId = client.userMeta.userId;
+            const docId = client.userMeta.docId;
+            const userId = client.userMeta.userId;
 
             if (docs[docId] && docs[docId][userId]) {
                 docs[docId][userId].count--;
@@ -244,6 +287,11 @@ app.post('/delete/:id/:redirect', function (req, res, next) {
     }));
     console.info('[Document Delete] docId: %s, redirect: %s', req.params.id, req.params.redirect);
     res.send(util.format('%s was deleted and redirected to %s', req.params.id, req.params.redirect));
+});
+
+// Health check
+app.get('/healthz', function(req, res){
+    res.json({ok: true});
 });
 
 server.listen(settings.port, settings.host, function() {
