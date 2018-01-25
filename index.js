@@ -26,19 +26,21 @@ const settings = {
     sentryDSN: process.env.SHAREJS_SENTRY_DSN
 };
 
-const client = new raven.Client(settings.sentryDSN);
+if (settings.sentryDSN) {
+    const ravneClient = new raven.Client(settings.sentryDSN);
 
-if (!settings.debug) {
-    client.patchGlobal(function() {
-        // It is highly discouraged to leave the process running after a
-        // global uncaught exception has occurred.
-        //
-        // https://github.com/getsentry/raven-node#catching-global-errors
-        // http://nodejs.org/api/process.html#process_event_uncaughtexception
-        //
-        console.log('Uncaught Exception process exiting');
-        process.exit(1);
-    });
+    if (!settings.debug) {
+        ravneClient.patchGlobal(function() {
+            // It is highly discouraged to leave the process running after a
+            // global uncaught exception has occurred.
+            //
+            // https://github.com/getsentry/raven-node#catching-global-errors
+            // http://nodejs.org/api/process.html#process_event_uncaughtexception
+            //
+            console.log('Uncaught Exception process exiting');
+            process.exit(1);
+        });
+    }
 }
 
 const mongoOptions = {
@@ -95,7 +97,9 @@ const locked = {};
 app.set('trust proxy');
 
 // Raven Express Middleware
-app.use(raven.middleware.express(settings.sentryDSN));
+if (settings.sentryDSN) {
+    app.use(raven.middleware.express(settings.sentryDSN));
+}
 app.use(morgan('common'));
 
 // Allow CORS
